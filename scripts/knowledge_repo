@@ -179,6 +179,7 @@ deploy.add_argument('-w', '--workers', default=4, type=int, help="Number of guni
 deploy.add_argument('-t', '--timeout', default=60, type=int, help="Specify the timeout (seconds) for the gunicorn web server")
 deploy.add_argument('-db', '--dburi', help='The SQLAlchemy database uri.')
 deploy.add_argument('-c', '--config', default=None, help="The config file from which to read server configuration.")
+deploy.add_argument('--engine', default='gunicorn', help='Which server engine to use when deploying; choose from: "uwsgi" or "gunicorn" (default).')
 
 db_upgrade = subparsers.add_parser('db_upgrade', help='Upgrade the database to the latest schema. Only necessary if you have disabled automatic migrations in your deployment.')
 db_upgrade.set_defaults(action='db_upgrade')
@@ -298,37 +299,26 @@ if args.action in ['preview', 'runserver']:
 
 
 elif args.action == 'deploy':
-    import tempfile
-    tmp_dir = tempfile.mkdtemp()
-    tmp_path = os.path.join(tmp_dir, 'server.py')
-
-    kr_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-
-    if isinstance(repo.uri, str):
-        uris = "'{}'".format(repo.uri.replace("'", "\\'"))
+    app = repo.get_app(debug=args.debug,
+                       db_uri=args.dburi,
+                       config=args.config)
+    if args.engine == 'gunicorn':
+        from knowledge_repo.app.deploy.gunicorn import GunicornDeployer
+        server = GunicornDeployer(app,
+                                  host='0.0.0.0',
+                                  port=args.port,
+                                  workers=args.workers,
+                                  timeout=args.timeout)
+    elif args.engine == 'uwsgi':
+        from knowledge_repo.app.deploy.uwsgi import uWSGIDeployer
+        server = uWSGIDeployer(app,
+                               host='0.0.0.0',
+                               port=args.port,
+                               workers=args.workers,
+                               timeout=args.timeout)
     else:
-        uris = str({prefix: repo.uri for prefix, repo in repo.uri.items()})
-
-    db_uri = "'{}'".format(args.dburi.replace("'", "\\'")) if isinstance(args.dburi, str) else str(args.dburi)
-
-    with open(tmp_path, 'w') as f:
-        f.write('''
-import sys
-sys.path.insert(0, '{}')
-import knowledge_repo
-app = knowledge_repo.KnowledgeRepository.for_uri({}).get_app(db_uri={}, debug={}, config={})
-        '''.format(kr_path, uris, db_uri, str(args.debug),
-                   '"' + os.path.abspath(args.config) + '"' if args.config is not None else "None",
-                   args.repo))
-
-    try:
-        # Run gunicorn server
-        cmd = "cd {}; gunicorn -w {} --timeout {} -b 0.0.0.0:{} server:app"
-        cmd = cmd.format(tmp_dir, args.workers, args.timeout, args.port)
-        # logger.info("Starting server with command:  " + " ".join(cmd))
-        subprocess.check_output(cmd, shell=True)
-    finally:
-        shutil.rmtree(tmp_dir)
+        raise RuntimeError("Engine '{}' not recognised. Choosed from 'uwsgi' or 'gunicorn'.".format(args.engine))
+    server.run()
 
 elif args.action == 'db_upgrade':
     app = repo.get_app(db_uri=args.dburi, debug=args.debug, config=args.config)
